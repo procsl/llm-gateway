@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>LLM Gateway Admin</title>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <style>
+        body { background-color: #f3f4f6; -webkit-tap-highlight-color: transparent; }
+        .hide-scrollbar::-webkit-scrollbar { display: none; }
+        .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        .json-view {
+            white-space: pre-wrap; word-break: break-word; font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 11px; line-height: 1.4; background: #ffffff; padding: 10px; border-radius: 6px;
+        }
+        @media (min-width: 768px) { .json-view { font-size: 12px; padding: 12px; } }
+        
+        .collapse-enter-active, .collapse-leave-active { transition: all 0.2s ease; max-height: 2000px; opacity: 1; overflow: hidden; }
+        .collapse-enter-from, .collapse-leave-to { max-height: 0; opacity: 0; }
+        .hljs { background: transparent !important; padding: 0 !important; }
+        
+        /* Timeline */
+        .timeline-line::before {
+            content: ''; position: absolute; left: 6px; top: 24px; bottom: -16px; width: 2px; background: #e5e7eb;
+        }
+        .timeline-item:last-child .timeline-line::before { display: none; }
+    </style>
+</head>
+<body>
+<div id="app" class="min-h-screen flex flex-col max-w-7xl mx-auto md:p-6 p-2 relative text-sm md:text-base">
+
+    <!-- Header -->
+    <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-4 md:mb-6">
+        <div>
+            <h1 class="text-xl md:text-3xl font-bold text-gray-800">🤖 智能大模型网关</h1>
+            <div class="text-xs text-gray-500 mt-1">全链路追踪控制台 v2.0</div>
+        </div>
+        <div class="mt-2 md:mt-0 flex gap-2">
+            <span class="text-[10px] md:text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded font-medium">Trace Enabled</span>
+        </div>
+    </div>
+
+    <!-- Tabs -->
+    <div class="flex overflow-x-auto space-x-2 mb-4 md:mb-6 border-b pb-2 hide-scrollbar sticky top-0 bg-[#f3f4f6] z-10 pt-2">
+        <button v-for="tab in tabs" :key="tab.id" @click="switchTab(tab.id)"
+            :class="currentTab === tab.id ? 'bg-blue-600 text-white border-blue-600 shadow-md' : 'bg-white text-gray-600 border-gray-200'"
+            class="px-3 py-1.5 md:px-4 md:py-2 rounded-full border text-xs md:text-sm font-medium whitespace-nowrap transition-all flex-shrink-0">
+            {{ tab.label }}
+        </button>
+    </div>
+
+    <!-- PROVIDERS Tab -->
+    <div v-if="currentTab === 'providers'" class="space-y-4 md:space-y-6">
+        <div class="bg-white p-4 rounded-xl shadow-sm border border-gray-100">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="font-bold text-base md:text-lg flex items-center gap-2">
+                    {{ isEditing ? '✏️ 编辑' : '➕ 添加' }}
+                    <span v-if="isEditing" class="text-xs font-normal bg-yellow-100 text-yellow-800 px-2 py-0.5 rounded">编辑模式</span>
+                </h3>
+                <button v-if="isEditing || pForm.name" @click="resetPForm" class="text-xs md:text-sm text-gray-500 underline">重置</button>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3 md:gap-4">
+                <div><label class="block text-xs text-gray-500 mb-1">名称 (ID)</label><input v-model="pForm.name" :disabled="isEditing" :class="isEditing ? 'bg-gray-100 cursor-not-allowed' : 'bg-white'" class="w-full border p-2 rounded-lg text-sm"></div>
+                <div><label class="block text-xs text-gray-500 mb-1">接口类型</label><select v-model="pForm.type" class="w-full border p-2 rounded-lg bg-white text-sm"><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option></select></div>
+                <div class="md:col-span-2"><label class="block text-xs text-gray-500 mb-1">Endpoint</label><input v-model="pForm.endpoint" class="w-full border p-2 rounded-lg text-sm" placeholder="https://..."></div>
+                <div class="md:col-span-2"><label class="block text-xs text-gray-500 mb-1">API Key</label><input v-model="pForm.key" type="password" class="w-full border p-2 rounded-lg text-sm" placeholder="sk-..."></div>
+                <div class="md:col-span-2"><label class="block text-xs text-gray-500 mb-1">代理 (可选)</label><input v-model="pForm.proxy" class="w-full border p-2 rounded-lg text-sm"></div>
+                <div class="md:col-span-2">
+                    <label class="block text-xs text-gray-500 mb-1">真实模型名称</label>
+                    <div class="flex gap-2 mb-2"><input v-model="pForm.realModel" class="flex-1 border p-2 rounded-lg text-sm"><button @click="tryFetchModels" class="bg-gray-100 px-3 py-2 rounded-lg text-xs whitespace-nowrap">拉取列表</button></div>
+                    <div v-if="fetchedModels.length > 0" class="bg-gray-50 border rounded-lg p-2 max-h-32 overflow-y-auto flex flex-wrap gap-1">
+                        <button v-for="model in fetchedModels" :key="model.id" @click="pForm.realModel = model.id" class="text-xs px-2 py-1 bg-white border rounded hover:bg-blue-50">{{ model.id }}</button>
+                    </div>
+                    <div class="mt-2"><input v-model="manualModelsInput" @input="parseManualModels" placeholder="或手动输入逗号分隔" class="w-full border p-2 rounded-lg text-xs font-mono"></div>
+                </div>
+            </div>
+            <button @click="saveProvider" class="w-full mt-4 bg-blue-600 text-white py-2.5 rounded-lg font-medium shadow-md hover:bg-blue-700 transition-colors">{{ isEditing ? '保存修改' : '确认添加' }}</button>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            <div v-for="(p, id) in providers" :key="id" class="bg-white p-4 rounded-xl shadow-sm border border-gray-200 hover:shadow-md transition-shadow">
+                <div class="flex justify-between items-start"><span class="font-bold text-gray-800 break-all">{{ p.name }}</span><span class="text-[10px] bg-gray-100 px-2 py-1 rounded whitespace-nowrap">{{ p.type }}</span></div>
+                <div class="text-xs text-gray-500 mt-2 truncate">{{ p.endpoint }}</div>
+                <div class="flex justify-end gap-3 mt-4 pt-3 border-t">
+                    <button @click="copyProvider(p)" class="text-xs text-blue-600 hover:underline">📄 复制</button><button @click="editProvider(p)" class="text-xs text-indigo-600 hover:underline">✏️ 编辑</button><button @click="deleteItem('providers', id)" class="text-xs text-red-500 hover:underline">🗑️ 删除</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- GROUPS Tab -->
+    <div v-if="currentTab === 'groups'" class="space-y-4 md:space-y-6">
+        <div class="bg-white p-4 md:p-6 rounded-xl shadow-sm border border-gray-100">
+            <div class="flex justify-between items-center mb-4"><h3 class="font-bold text-base md:text-lg">{{ isEditingGroup ? '✏️ 编辑转发组' : '🔗 新建转发组' }}</h3><button v-if="isEditingGroup || gForm.name" @click="resetGForm" class="text-xs md:text-sm text-gray-500 underline">重置</button></div>
+            <div class="space-y-4">
+                <input v-model="gForm.name" :disabled="isEditingGroup" placeholder="组名称 (外部请求模型名)" :class="isEditingGroup ? 'bg-gray-100' : ''" class="w-full border p-2 rounded-lg text-sm">
+                <select v-model="gForm.type" class="w-full border p-2 rounded-lg bg-white text-sm" @change="gForm.providers=[]"><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option></select>
+                <div class="p-3 bg-gray-50 rounded-lg border">
+                    <label class="block text-xs font-bold text-gray-700 mb-2">选择提供者 (数字代表优先级)</label>
+                    <div class="flex flex-wrap gap-2">
+                        <button v-for="(p, pid) in providers" :key="pid" v-show="p.type === gForm.type" @click="toggleProvider(p.name)" class="px-2 py-1.5 md:px-3 rounded-lg text-xs border flex items-center gap-1 transition-colors" :class="gForm.providers.includes(p.name) ? 'bg-green-100 border-green-400 text-green-800' : 'bg-white text-gray-600 hover:bg-gray-50'">
+                            <span v-if="gForm.providers.includes(p.name)" class="font-bold bg-white w-4 h-4 rounded-full flex items-center justify-center text-[10px] border border-green-200">{{ gForm.providers.indexOf(p.name) + 1 }}</span>{{ p.name }}
+                        </button>
+                    </div>
+                </div>
+                <button @click="saveGroup" class="w-full bg-green-600 text-white py-2.5 rounded-lg font-medium shadow-md hover:bg-green-700 transition-colors">{{ isEditingGroup ? '保存转发组' : '创建转发组' }}</button>
+            </div>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div v-for="(g, id) in groups" :key="id" class="bg-white p-4 rounded-xl shadow-sm border border-gray-200">
+                <div class="flex justify-between"><h4 class="font-bold text-gray-800">{{ g.name }}</h4><div class="flex gap-2"><button @click="editGroup(g)" class="text-xs text-indigo-600 bg-indigo-50 px-2 py-1 rounded">编辑</button><button @click="deleteItem('groups', id)" class="text-xs text-red-500 bg-red-50 px-2 py-1 rounded">删除</button></div></div>
+                <div class="mt-3 flex flex-wrap gap-1"><span v-for="(pname, idx) in g.providers" :key="idx" class="bg-green-50 text-green-700 border border-green-100 px-2 py-1 rounded text-xs">{{ idx + 1 }}. {{ pname }}</span></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- KEYS Tab -->
+    <div v-if="currentTab === 'keys'" class="space-y-4 md:space-y-6">
+        <div class="bg-white p-4 rounded-xl shadow-sm border flex flex-col md:flex-row gap-3">
+            <input v-model="kForm.name" placeholder="备注名称" class="border p-2.5 rounded-lg text-sm md:w-1/3">
+            <input v-model="kForm.key" placeholder="sk-..." class="border p-2.5 rounded-lg text-sm flex-1 font-mono">
+            <button @click="saveKey" class="bg-purple-600 text-white px-6 py-2.5 rounded-lg font-medium hover:bg-purple-700 transition-colors">添加 Key</button>
+        </div>
+        <div class="space-y-3">
+            <div v-for="(k, id) in keys" :key="id" class="bg-white p-4 rounded-xl shadow-sm border flex flex-col md:flex-row justify-between md:items-center gap-2 hover:shadow-md transition-shadow">
+                <div class="overflow-hidden"><div class="font-bold text-gray-800">{{ k.name }}</div><div class="text-xs font-mono text-gray-500 break-all select-all">{{ k.key }}</div></div>
+                <button @click="deleteItem('keys', id)" class="text-red-500 hover:bg-red-50 px-2 py-1 rounded text-sm transition-colors text-right md:text-left self-end md:self-auto">删除</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- LOGS Tab -->
+    <div v-if="currentTab === 'logs'" class="space-y-4 flex flex-col" style="height: calc(100vh - 160px);">
+        <!-- Controls -->
+        <div class="flex flex-col md:flex-row justify-between items-start md:items-center flex-shrink-0 gap-3">
+            <div class="flex-1">
+                <h3 class="font-bold text-gray-700">📜 全链路日志</h3>
+                <div class="text-xs text-gray-500 mt-1">加载 {{ logs.length }} 条 <span v-if="logState.loading" class="ml-2 animate-pulse text-blue-500">加载中...</span></div>
+            </div>
+            <div class="flex gap-2 items-center flex-wrap w-full md:w-auto">
+                <button @click="toggleErrorFilter" :class="logState.filterError ? 'bg-red-500 text-white border-red-500' : 'bg-white text-gray-600 border-gray-300'" class="text-xs px-3 py-1.5 rounded border flex-1 md:flex-none text-center">⚠️ 错误</button>
+                <button @click="refreshLogs" :disabled="logState.loading" class="text-xs px-3 py-1.5 rounded border bg-white text-blue-600 border-blue-200 hover:bg-blue-50 flex-1 md:flex-none text-center">刷新</button>
+                <button @click="confirmClearLogs" class="text-xs px-3 py-1.5 rounded border bg-red-50 text-red-600 border-red-200 hover:bg-red-100 flex-1 md:flex-none text-center">清除</button>
+            </div>
+        </div>
+        
+        <!-- Search -->
+        <div class="bg-white p-2 md:p-3 rounded-xl shadow-sm border flex gap-2 items-center">
+            <span class="text-gray-400">🔍</span>
+            <input v-model="logState.keyword" @keyup.enter="applyFilters" placeholder="搜索 (TraceID, Key, Error...)" class="flex-1 text-xs md:text-sm outline-none bg-transparent min-w-0">
+            <button v-if="logState.keyword" @click="clearFilters" class="text-xs text-gray-500 bg-gray-100 rounded px-2">清除</button>
+            <button @click="applyFilters" class="text-xs bg-blue-600 text-white px-3 py-1.5 rounded hover:bg-blue-700 whitespace-nowrap">搜索</button>
+        </div>
+
+        <!-- Log List Table -->
+        <div class="bg-white rounded-xl shadow-sm overflow-hidden border flex flex-col flex-grow min-h-0 relative">
+            <div ref="logContainer" class="overflow-x-auto flex-grow" style="overflow-y: auto; max-height: 100%;" @scroll="handleScroll">
+                <table class="w-full text-xs md:text-sm text-left whitespace-nowrap">
+                    <thead class="bg-gray-50 text-gray-500 border-b sticky top-0 z-10">
+                        <tr><th class="p-2 md:p-3">时间</th><th class="p-2 md:p-3">凭证/ID</th><th class="p-2 md:p-3">路由</th><th class="p-2 md:p-3">链路</th><th class="p-2 md:p-3">状态</th><th class="p-2 md:p-3 text-right">操作</th></tr>
+                    </thead>
+                    <tbody class="divide-y divide-gray-100">
+                        <tr v-for="log in logs" :key="log.id" class="hover:bg-gray-50 group transition-colors">
+                            <td class="p-2 md:p-3 text-gray-500 text-[10px] md:text-xs font-mono">
+                                <div>{{ formatTime(log.timestamp).split(' ')[0] }}</div>
+                                <div class="text-gray-400">{{ formatTime(log.timestamp).split(' ')[1] }}</div>
+                            </td>
+                            <td class="p-2 md:p-3">
+                                <div class="font-medium text-gray-800">{{ log.keyName || 'Unknown' }}</div>
+                                <div class="text-[10px] text-gray-400 font-mono">{{ log.id.slice(0,8) }}</div>
+                            </td>
+                            <td class="p-2 md:p-3">
+                                <div class="flex items-center gap-1">
+                                    <span class="text-gray-600 font-medium truncate max-w-[80px] md:max-w-[120px]">{{ log.clientRequest?.body?.model || '?' }}</span>
+                                    <span class="text-gray-400">→</span>
+                                    <span class="text-[10px] md:text-xs bg-gray-100 px-1.5 py-0.5 rounded text-gray-600">{{ log.route?.group || 'Direct' }}</span>
+                                </div>
+                            </td>
+                            <td class="p-2 md:p-3">
+                                <div class="flex items-center gap-1">
+                                    <div v-for="(att, i) in log.attempts" :key="i" class="w-2 h-2 md:w-2.5 md:h-2.5 rounded-full border" :class="att.status >= 200 && att.status < 300 ? 'bg-green-400 border-green-500' : 'bg-red-400 border-red-500'"></div>
+                                    <span v-if="!log.attempts?.length" class="text-gray-300">-</span>
+                                </div>
+                            </td>
+                            <td class="p-2 md:p-3">
+                                <span :class="log.status >= 200 && log.status < 300 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'" class="px-1.5 py-0.5 rounded font-bold text-[10px] md:text-xs">
+                                    {{ log.status || 'ERR' }}
+                                </span>
+                            </td>
+                            <td class="p-2 md:p-3 text-right">
+                                <button @click="showLogDetail(log)" class="text-blue-600 font-medium px-2 py-1 bg-blue-50 rounded text-xs whitespace-nowrap">🔍 追踪</button>
+                            </td>
+                        </tr>
+                        <tr v-if="logState.hasMore && !logState.loading"><td colspan="6" class="p-4 text-center text-gray-400 text-xs">↓ 下滑加载</td></tr>
+                        <tr v-if="logState.loading"><td colspan="6" class="p-4 text-center text-blue-600 text-xs">加载中...</td></tr>
+                        <tr v-if="logs.length === 0 && !logState.loading"><td colspan="6" class="p-8 text-center text-gray-400">暂无日志</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- STATS Tab -->
+    <div v-if="currentTab === 'stats'" class="space-y-6">
+        <div class="bg-white p-4 rounded-xl shadow-sm border">
+            <h3 class="font-bold text-lg mb-4 flex justify-between items-center">
+                <span>🎚️ 权重监控</span>
+                <div class="flex gap-2"><button @click="switchTab('stats')" class="text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded">刷新</button><button @click="confirmClearWeights" class="text-xs bg-red-50 text-red-600 px-2 py-1 rounded">清除</button></div>
+            </h3>
+            <div class="overflow-x-auto">
+                <table class="w-full text-xs md:text-sm whitespace-nowrap"><thead class="bg-gray-50 text-gray-600"><tr><th class="p-2 text-left">提供者</th><th class="p-2 text-left">权重</th><th class="p-2 text-left">错误(1m)</th><th class="p-2 text-left">总失败</th><th class="p-2 text-left">状态</th></tr></thead>
+                    <tbody class="divide-y divide-gray-100">
+                        <tr v-for="(w, pname) in weightStatus" :key="pname" class="hover:bg-gray-50">
+                            <td class="p-2 font-medium">{{ pname }}</td>
+                            <td class="p-2"><span class="font-bold" :class="w.currentWeight >= 50 ? 'text-green-600' : 'text-red-600'">{{ w.currentWeight.toFixed(1) }}</span> <span class="text-gray-400">/ {{ w.baseWeight }}</span></td>
+                            <td class="p-2">{{ w.recentErrors }}</td><td class="p-2">{{ w.totalFailures }}</td>
+                            <td class="p-2"><span v-if="w.recentErrors === 0" class="text-green-600 bg-green-100 px-2 py-0.5 rounded">✅ 正常</span><span v-else class="text-red-600 bg-red-100 px-2 py-0.5 rounded">❌ 降权</span></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Trace Detail Modal (Responsive) -->
+    <div v-if="logModal.show" class="fixed inset-0 bg-black bg-opacity-60 z-50 flex items-center justify-center p-0 md:p-4" @click.self="logModal.show = false">
+        <div class="bg-white w-full md:max-w-6xl h-full md:h-[95vh] md:rounded-xl flex flex-col shadow-2xl overflow-hidden modal-content">
+            <!-- Modal Header -->
+            <div class="p-3 md:p-4 border-b flex justify-between items-center bg-gray-50 flex-shrink-0">
+                <div class="overflow-hidden">
+                    <h3 class="font-bold text-base md:text-lg flex items-center gap-2 truncate">
+                        🔍 追踪
+                        <span class="text-[10px] md:text-xs font-normal px-2 py-0.5 rounded-full border" 
+                            :class="logModal.trace.status >= 200 && logModal.trace.status < 300 ? 'bg-green-100 text-green-700 border-green-200' : 'bg-red-100 text-red-700 border-red-200'">
+                            {{ logModal.trace.status }}
+                        </span>
+                    </h3>
+                    <div class="text-[10px] md:text-xs text-gray-500 mt-1 flex gap-2 md:gap-4 font-mono truncate">
+                        <span>{{ logModal.trace.id.slice(0,8) }}...</span>
+                        <span>⏱️ {{ logModal.trace.totalDuration }}ms</span>
+                        <span>👤 {{ logModal.trace.keyName }}</span>
+                    </div>
+                </div>
+                <button @click="logModal.show = false" class="text-2xl text-gray-400 hover:text-gray-700 px-2">×</button>
+            </div>
+
+            <!-- Modal Body: Stack on mobile, Row on Desktop -->
+            <div class="flex flex-col md:flex-row flex-1 overflow-hidden">
+                
+                <!-- Timeline (Top on mobile, Left on desktop) -->
+                <div class="w-full md:w-1/4 h-40 md:h-auto bg-gray-50 border-b md:border-b-0 md:border-r overflow-y-auto p-3 md:p-4 space-y-3 md:space-y-4 flex-shrink-0">
+                    <div class="text-[10px] md:text-xs font-bold text-gray-500 uppercase tracking-wider mb-2 sticky top-0 bg-gray-50 z-10">执行链路</div>
+                    
+                    <!-- Client Request -->
+                    <div @click="switchAttempt(-1)" 
+                         :class="logModal.activeAttemptIndex === -1 ? 'bg-blue-50 border-blue-400 ring-1 ring-blue-200' : 'bg-white border-gray-200'"
+                         class="p-2 md:p-3 rounded-lg border cursor-pointer relative timeline-item z-10">
+                        <div class="font-bold text-gray-700 text-xs md:text-sm">🌐 Client</div>
+                        <div class="text-[10px] md:text-xs text-gray-500 mt-1">{{ logModal.trace.route?.group || 'Direct' }}</div>
+                        <div class="absolute -right-2 top-1/2 -mt-1 w-2 h-2 bg-blue-400 rounded-full" v-if="logModal.activeAttemptIndex === -1"></div>
+                        <div v-if="logModal.trace.attempts?.length" class="timeline-line"></div>
+                    </div>
+
+                    <!-- Attempts -->
+                    <div v-for="(attempt, idx) in logModal.trace.attempts" :key="idx" class="relative pl-4 ml-2 timeline-item">
+                        <div class="absolute -left-[5px] top-4 w-3 h-3 rounded-full border-2 bg-white z-10" :class="attempt.status >= 200 && attempt.status < 300 ? 'border-green-500' : 'border-red-500'"></div>
+                        <div class="timeline-line"></div>
+                        <div @click="switchAttempt(idx)" 
+                             :class="logModal.activeAttemptIndex === idx ? 'bg-blue-50 border-blue-400 ring-1 ring-blue-200' : 'bg-white border-gray-200'"
+                             class="p-2 md:p-3 rounded-lg border cursor-pointer mb-2">
+                            <div class="flex justify-between items-center mb-1">
+                                <span class="font-bold text-xs md:text-sm truncate pr-2">{{ attempt.provider }}</span>
+                                <span class="text-[10px] px-1.5 py-0.5 rounded font-mono flex-shrink-0" :class="attempt.status >= 200 && attempt.status < 300 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'">{{ attempt.status }}</span>
+                            </div>
+                            <div class="text-[10px] md:text-xs text-gray-500 flex justify-between">
+                                <span>⚖️ {{ attempt.weight?.toFixed(0) || 'N/A' }}</span><span>⏱️ {{ attempt.duration }}ms</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Details (Bottom on mobile, Right on desktop) -->
+                <div class="flex-1 flex flex-col overflow-hidden bg-white">
+                    <div class="p-2 md:p-3 border-b flex justify-between items-center bg-white shadow-sm z-10 flex-shrink-0">
+                        <div class="flex gap-2 items-center overflow-hidden">
+                            <span class="text-xs md:text-sm font-bold text-gray-700 truncate">
+                                {{ logModal.activeAttemptIndex === -1 ? '🌐 原始请求 & 最终响应' : `🔄 #${logModal.activeAttemptIndex + 1}: ${activeContext.provider}` }}
+                            </span>
+                        </div>
+                        <div class="flex gap-2 flex-shrink-0">
+                            <button v-if="activeContext && activeContext.response && typeof activeContext.response === 'string' && activeContext.response.includes('data:')" 
+                                    @click="logModal.showMerged = !logModal.showMerged"
+                                    :class="logModal.showMerged ? 'bg-indigo-50 text-indigo-700 border-indigo-200' : 'bg-gray-50 text-gray-600 border-gray-200'"
+                                    class="text-[10px] md:text-xs px-2 py-1 md:px-3 md:py-1.5 rounded border font-medium">
+                                {{ logModal.showMerged ? '✨ 合并' : '📝 原始' }}
+                            </button>
+                            <button @click="copyToClipboard(JSON.stringify(activeContext, null, 2))" class="text-[10px] md:text-xs px-2 py-1 md:px-3 md:py-1.5 bg-gray-50 border rounded text-gray-600">复制JSON</button>
+                        </div>
+                    </div>
+
+                    <div class="flex-1 overflow-y-auto p-2 md:p-4 space-y-3 md:space-y-4 bg-gray-50/50" v-if="activeContext">
+                        <!-- Error -->
+                        <div v-if="activeContext.error" class="bg-white border border-red-200 rounded-lg overflow-hidden">
+                            <div @click="activeUI.error = !activeUI.error" class="bg-red-50 px-3 py-2 border-b border-red-100 flex justify-between items-center">
+                                <div class="text-red-700 font-bold text-xs uppercase">⚠️ Error</div>
+                                <span class="text-red-400 transform transition-transform" :class="activeUI.error ? 'rotate-90' : ''">▶</span>
+                            </div>
+                            <div v-show="activeUI.error" class="p-3 bg-red-50/30"><pre class="text-xs text-red-700 whitespace-pre-wrap font-mono break-all">{{ typeof activeContext.error === 'string' ? activeContext.error : JSON.stringify(activeContext.error, null, 2) }}</pre></div>
+                        </div>
+                        
+                        <!-- Headers/Body Accordions -->
+                        <div v-for="(section, key) in {reqHeaders:'📤 Req Headers', reqBody:'📦 Req Body', resHeaders:'📥 Res Headers', resBody:'📄 Res Body'}" :key="key" class="bg-white border border-gray-200 rounded-lg overflow-hidden">
+                            <div @click="activeUI[key] = !activeUI[key]" class="bg-gray-50 px-3 py-2 border-b border-gray-100 flex justify-between items-center cursor-pointer select-none">
+                                <div class="flex items-center gap-2 text-gray-600 font-bold text-xs uppercase">
+                                    <span>{{ section }}</span>
+                                    <span v-if="key.includes('Body') && key==='reqBody'" class="bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded-full text-[10px] hidden md:inline">{{ activeContext.request?.body?.model }}</span>
+                                </div>
+                                <span class="text-gray-400 transform transition-transform" :class="activeUI[key] ? 'rotate-90' : ''">▶</span>
+                            </div>
+                            <div v-show="activeUI[key]" class="p-0">
+                                <pre v-if="key === 'reqHeaders'" class="p-3 text-xs font-mono overflow-x-auto">{{ JSON.stringify(activeContext.headers, null, 2) }}</pre>
+                                <pre v-if="key === 'reqBody'" class="p-3 text-xs font-mono overflow-x-auto json-view" v-html="highlightJSON(getDisplayContent(activeContext.request?.body))"></pre>
+                                <pre v-if="key === 'resHeaders'" class="p-3 text-xs font-mono overflow-x-auto">{{ JSON.stringify(activeContext.resHeaders, null, 2) }}</pre>
+                                <pre v-if="key === 'resBody'" class="p-3 text-xs font-mono overflow-x-auto json-view" v-html="highlightJSON(getDisplayContent(activeContext.response))"></pre>
+                            </div>
+                        </div>
+                    </div>
+                    <div v-else class="flex-1 flex items-center justify-center text-gray-400 text-xs">请选择节点</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Confirm Modals -->
+    <div v-if="showClearLogsModal" class="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4" @click.self="showClearLogsModal = false">
+        <div class="bg-white w-full max-w-sm rounded-xl shadow-2xl p-4">
+            <h3 class="font-bold text-lg text-red-800 mb-3">⚠️ 确认清除</h3>
+            <div class="flex gap-2"><button @click="clearLogs('today')" class="flex-1 bg-red-600 text-white py-2 rounded">仅今日</button><button @click="clearLogs('all')" class="flex-1 bg-red-700 text-white py-2 rounded">全部</button></div>
+            <button @click="showClearLogsModal = false" class="w-full mt-2 bg-gray-100 py-2 rounded">取消</button>
+        </div>
+    </div>
+    <div v-if="showClearWeightsModal" class="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4" @click.self="showClearWeightsModal = false">
+        <div class="bg-white w-full max-w-sm rounded-xl shadow-2xl p-4">
+            <h3 class="font-bold text-lg text-orange-800 mb-3">⚠️ 清除权重</h3>
+            <div class="flex gap-2"><button @click="clearWeights" class="flex-1 bg-orange-600 text-white py-2 rounded">确认</button><button @click="showClearWeightsModal = false" class="flex-1 bg-gray-100 py-2 rounded">取消</button></div>
+        </div>
+    </div>
+</div>
+<script src="/js/admin.js"></script>
+</body>
+</html>
