@@ -14,31 +14,26 @@ createApp({
 
         // === 日志列表状态 ===
         const logState = ref({
-            offset: 0,
-            limit: 20,
-            hasMore: true,
-            loading: false,
-            showScrollTop: false,
-            keyword: '',
-            filterError: false
+            offset: 0, limit: 20, hasMore: true, loading: false, showScrollTop: false, keyword: '', filterError: false
         });
         const logContainer = ref(null);
 
-        // === 详情弹窗状态 (Trace) ===
+        // === 详情弹窗 (Trace) ===
         const logModal = ref({
+            show: false, trace: null, activeAttemptIndex: -1, showMerged: true,
+        });
+
+        // === [新增] 对话回放弹窗 (Chat Replay) ===
+        const chatModal = ref({
             show: false,
-            trace: null,
-            activeAttemptIndex: -1,
-            showMerged: true,
+            messages: [], // { role, content, type(text/tool), toolName, toolArgs, raw }
+            model: '',
+            traceId: ''
         });
 
         // === UI 折叠状态 ===
         const activeUI = ref({
-            reqHeaders: false,
-            reqBody: true,
-            resHeaders: false,
-            resBody: true,
-            error: true
+            reqHeaders: false, reqBody: true, resHeaders: false, resBody: true, error: true
         });
 
         // === 确认弹窗 ===
@@ -86,7 +81,6 @@ createApp({
                 const params = new URLSearchParams({ limit: logState.value.limit.toString(), refresh: 'true' });
                 if (logState.value.keyword) params.append('keyword', logState.value.keyword);
                 if (logState.value.filterError) params.append('filterError', 'true');
-
                 const response = await fetch(`${API_BASE}/logs?${params}`);
                 const data = await response.json();
                 logs.value = Array.isArray(data) ? data : data.logs || [];
@@ -103,7 +97,6 @@ createApp({
                 const params = new URLSearchParams({ offset: logState.value.offset.toString(), limit: logState.value.limit.toString() });
                 if (logState.value.keyword) params.append('keyword', logState.value.keyword);
                 if (logState.value.filterError) params.append('filterError', 'true');
-
                 const response = await fetch(`${API_BASE}/logs?${params}`);
                 const data = await response.json();
                 if (data.logs?.length) { logs.value = [...logs.value, ...data.logs]; logState.value.offset += data.logs.length; }
@@ -119,30 +112,19 @@ createApp({
         // === 详情页逻辑 ===
         const showLogDetail = (log) => {
             logModal.value.trace = log;
-            if (log.attempts && log.attempts.length > 0) {
-                logModal.value.activeAttemptIndex = log.attempts.length - 1;
-            } else {
-                logModal.value.activeAttemptIndex = -1;
-            }
+            logModal.value.activeAttemptIndex = (log.attempts && log.attempts.length > 0) ? log.attempts.length - 1 : -1;
             logModal.value.showMerged = true;
             logModal.value.show = true;
             resetUIState();
         };
 
-        const switchAttempt = (index) => {
-            logModal.value.activeAttemptIndex = index;
-            resetUIState();
-        };
-
-        const resetUIState = () => {
-            activeUI.value = { reqHeaders: false, reqBody: true, resHeaders: false, resBody: true, error: true };
-        };
+        const switchAttempt = (index) => { logModal.value.activeAttemptIndex = index; resetUIState(); };
+        const resetUIState = () => { activeUI.value = { reqHeaders: false, reqBody: true, resHeaders: false, resBody: true, error: true }; };
 
         const activeContext = computed(() => {
             const trace = logModal.value.trace;
             if (!trace) return null;
             const idx = logModal.value.activeAttemptIndex;
-
             if (idx === -1) {
                 const errorInfo = trace.finalResponse?.error || trace.attempts?.find(a => a.status >= 400)?.error;
                 return {
@@ -161,11 +143,145 @@ createApp({
             }
         });
 
-        // === SSE Logic ===
+        // === [新增] 对话回放逻辑 ===
+        
+        const openChatPreview = (log) => {
+            const reqBody = log.clientRequest?.body;
+            let resBody = log.finalResponse;
+
+            // 尝试解析响应体（如果是字符串格式的 JSON 或 SSE）
+            if (typeof resBody === 'string') {
+                if (resBody.includes('data:')) {
+                    const merged = mergeSSEToJSON(resBody);
+                    try { resBody = JSON.parse(merged); } catch(e) {}
+                } else {
+                    try { resBody = JSON.parse(resBody); } catch(e) {}
+                }
+            }
+
+            chatModal.value.traceId = log.id;
+            chatModal.value.model = reqBody?.model || 'Unknown';
+            chatModal.value.messages = normalizeChatMessages(reqBody, resBody);
+            chatModal.value.show = true;
+        };
+
+        // 核心：标准化消息格式 (OpenAI & Anthropic -> Unified UI Format)
+        const normalizeChatMessages = (reqBody, resBody) => {
+            if (!reqBody) return [];
+            const msgs = [];
+
+            // 1. 处理请求部分 (Request History)
+            
+            // Anthropic System Prompt
+            if (reqBody.system) {
+                msgs.push({ role: 'system', content: reqBody.system, type: 'text' });
+            }
+
+            // Messages Array (OpenAI & Anthropic common)
+            if (Array.isArray(reqBody.messages)) {
+                reqBody.messages.forEach(m => {
+                    // 处理 Anthropic 的 content 数组 (可能包含 text 或 tool_use)
+                    if (Array.isArray(m.content)) {
+                        m.content.forEach(block => {
+                            if (block.type === 'text') {
+                                msgs.push({ role: m.role, content: block.text, type: 'text' });
+                            } else if (block.type === 'tool_use') {
+                                msgs.push({ 
+                                    role: m.role, 
+                                    type: 'tool_call', 
+                                    toolName: block.name, 
+                                    toolArgs: block.input, // Object
+                                    toolId: block.id
+                                });
+                            } else if (block.type === 'tool_result') {
+                                msgs.push({
+                                    role: 'tool',
+                                    type: 'tool_result',
+                                    content: block.content,
+                                    toolId: block.tool_use_id
+                                });
+                            }
+                        });
+                    } 
+                    // 处理 OpenAI Tool Calls
+                    else if (m.tool_calls) {
+                        // 先放 content (如果有)
+                        if (m.content) msgs.push({ role: m.role, content: m.content, type: 'text' });
+                        
+                        m.tool_calls.forEach(tc => {
+                            let args = tc.function.arguments;
+                            try { args = typeof args === 'string' ? JSON.parse(args) : args; } catch(e){}
+                            
+                            msgs.push({
+                                role: m.role,
+                                type: 'tool_call',
+                                toolName: tc.function.name,
+                                toolArgs: args,
+                                toolId: tc.id
+                            });
+                        });
+                    }
+                    // 普通文本
+                    else {
+                        msgs.push({ role: m.role, content: m.content, type: 'text' });
+                    }
+                });
+            }
+
+            // 2. 处理响应部分 (The Response)
+            if (resBody) {
+                // OpenAI Response
+                if (resBody.choices && resBody.choices[0]) {
+                    const msg = resBody.choices[0].message;
+                    if (msg.content) {
+                        msgs.push({ role: 'assistant', content: msg.content, type: 'text' });
+                    }
+                    if (msg.tool_calls) {
+                        msg.tool_calls.forEach(tc => {
+                            let args = tc.function.arguments;
+                            try { args = typeof args === 'string' ? JSON.parse(args) : args; } catch(e){}
+                            msgs.push({
+                                role: 'assistant',
+                                type: 'tool_call',
+                                toolName: tc.function.name,
+                                toolArgs: args,
+                                toolId: tc.id
+                            });
+                        });
+                    }
+                } 
+                // Anthropic Response
+                else if (resBody.type === 'message' && resBody.content) {
+                    resBody.content.forEach(block => {
+                        if (block.type === 'text') {
+                            msgs.push({ role: 'assistant', content: block.text, type: 'text' });
+                        } else if (block.type === 'tool_use') {
+                            msgs.push({ 
+                                role: 'assistant', 
+                                type: 'tool_call', 
+                                toolName: block.name, 
+                                toolArgs: block.input,
+                                toolId: block.id
+                            });
+                        }
+                    });
+                }
+                // Error Response
+                else if (resBody.error) {
+                    msgs.push({ role: 'system', content: `❌ Error: ${JSON.stringify(resBody.error)}`, type: 'error' });
+                }
+            }
+
+            return msgs;
+        };
+
+        // === SSE Logic (保持不变) ===
         const mergeSSEToJSON = (sseData) => {
             if (!sseData || typeof sseData !== 'string') return sseData;
             const lines = sseData.split(/\r?\n/);
             let fullContent = "", role = "assistant", model = "", isAnthropic = false, reasoningContent = "";
+            let currentToolCall = null, toolCalls = [];
+
             for (const line of lines) {
                 const trimmed = line.trim();
                 if (!trimmed.startsWith('data:')) continue;
@@ -173,19 +289,29 @@ createApp({
                 if (jsonStr === '[DONE]') continue;
                 try {
                     const obj = JSON.parse(jsonStr);
+                    // OpenAI
                     if (obj.choices && obj.choices[0]) {
                         const delta = obj.choices[0].delta;
                         if (delta.content) fullContent += delta.content;
                         if (delta.reasoning_content) reasoningContent += delta.reasoning_content;
                         if (delta.role) role = delta.role;
                         if (obj.model) model = obj.model;
-                    } else if (obj.type) {
+                        
+                        // OpenAI Tool Call Chunking (简单合并逻辑，复杂场景可能需要更严谨的处理)
+                        if (delta.tool_calls) {
+                           // 仅演示：流式工具调用合并比较复杂，这里简化处理，通常 admin 查看时不一定能完美还原流式中间态
+                           // 建议后端已经由 Trace 保存了完整 responseBody (非流)，如果只有流，暂且略过深度合并
+                        }
+                    } 
+                    // Anthropic
+                    else if (obj.type) {
                         isAnthropic = true;
                         if (obj.type === 'message_start' && obj.message) model = obj.message.model;
                         else if (obj.type === 'content_block_delta' && obj.delta?.text) fullContent += obj.delta.text;
                     }
                 } catch (e) { }
             }
+            // 返回构造的 JSON
             if (isAnthropic) {
                 return JSON.stringify({ id: "merged-sse-preview", type: "message", role: "assistant", model: model, content: [{ type: "text", text: fullContent }] }, null, 2);
             } else {
@@ -267,10 +393,10 @@ createApp({
         onMounted(fetchData);
 
         return {
-            tabs, currentTab, switchTab, providers, groups, keys, stats, logs, logModal, weightStatus,
+            tabs, currentTab, switchTab, providers, groups, keys, stats, logs, logModal, chatModal, weightStatus,
             pForm, gForm, kForm, isEditing, isEditingGroup, fetchedModels, manualModelsInput,
             logState, logContainer, showClearLogsModal, showClearWeightsModal, 
-            activeContext, activeUI, switchAttempt,
+            activeContext, activeUI, switchAttempt, openChatPreview,
             saveProvider, resetPForm, editProvider, copyProvider, deleteItem, saveGroup, resetGForm, editGroup, toggleProvider, saveKey,
             tryFetchModels, parseManualModels, loadLogs, refreshLogs, showLogDetail, formatTime, 
             getDisplayContent, highlightJSON, copyToClipboard, handleScroll, scrollToTop, applyFilters, clearFilters, toggleErrorFilter,
